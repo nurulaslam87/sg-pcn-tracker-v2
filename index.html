@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Permanent SG PCN Navigator</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; font-family: -apple-system, sans-serif; overflow: hidden; }
+        #map { height: 100vh; width: 100vw; z-index: 1; }
+        
+        .panel {
+            position: absolute; top: 10px; left: 10px; right: 10px; z-index: 1000;
+            background: white; padding: 12px; border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2); display: flex; flex-direction: column; gap: 8px;
+        }
+        .input-row { display: flex; gap: 5px; }
+        input { flex-grow: 1; padding: 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
+        button { padding: 10px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        .btn-gps { background: #e3f2fd; color: #1976d2; }
+        .btn-go { background: #2e7d32; color: white; width: 100%; margin-top: 5px; }
+
+        #nav-guide {
+            position: absolute; top: 0; left: 0; right: 0; z-index: 2000;
+            background: #2e7d32; color: white; padding: 20px; text-align: center; display: none;
+        }
+        #search-results { background: white; max-height: 150px; overflow-y: auto; display: none; border: 1px solid #eee; border-radius: 8px; }
+        .res-item { padding: 10px; border-bottom: 1px solid #eee; font-size: 13px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <div class="panel" id="ui">
+        <div class="input-row">
+            <input type="text" id="startInput" placeholder="Start Point">
+            <button class="btn-gps" onclick="setGPS('start')">GPS</button>
+        </div>
+        <div class="input-row">
+            <input type="text" id="endInput" placeholder="End Point">
+            <button class="btn-gps" onclick="setGPS('end')">GPS</button>
+        </div>
+        <div id="search-results"></div>
+        <button class="btn-go" onclick="calculateRoute()">PLAN ROUTE</button>
+        <button id="nav-btn" style="display:none; background:#1a73e8; color:white;" class="btn-go" onclick="startNav()">START NAV</button>
+    </div>
+
+    <div id="nav-guide">
+        <div id="instruction" style="font-weight:bold; font-size:18px;">Following Route...</div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script>
+        const map = L.map('map', { zoomControl: false }).setView([1.3521, 103.8198], 12);
+        let startMarker, endMarker, routeLayer, gpsPos = null;
+        let isNavigating = false;
+
+        // 1. Permanent Tiles (OpenStreetMap) - No Token Needed
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        // 2. Load PCN Visual Layer (Static File)
+        fetch('pcn.json').then(res => res.json()).then(data => {
+            L.geoJSON(data, { style: { color: 'green', weight: 4, opacity: 0.4 } }).addTo(map);
+        });
+
+        // Setup Draggable Markers
+        startMarker = L.marker([1.3521, 103.8198], { draggable: true, icon: createIcon('green') }).addTo(map);
+        endMarker = L.marker([1.3621, 103.8198], { draggable: true, icon: createIcon('red') }).addTo(map);
+
+        // GPS Tracking
+        map.locate({watch: true, enableHighAccuracy: true});
+        map.on('locationfound', e => { 
+            gpsPos = e.latlng;
+            if (isNavigating) map.panTo(e.latlng);
+        });
+
+        function setGPS(type) {
+            if (!gpsPos) return alert("Waiting for GPS...");
+            const m = (type === 'start') ? startMarker : endMarker;
+            m.setLatLng(gpsPos);
+            map.setView(gpsPos, 15);
+        }
+
+        // 3. Permanent Search (Nominatim) - No Token Needed
+        let searchTarget = 'start';
+        document.getElementById('startInput').oninput = () => triggerSearch('start');
+        document.getElementById('endInput').oninput = () => triggerSearch('end');
+
+        async function triggerSearch(type) {
+            searchTarget = type;
+            const query = document.getElementById(type + 'Input').value;
+            if (query.length < 3) return;
+
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}+singapore`);
+            const data = await res.json();
+            
+            const list = document.getElementById('search-results');
+            list.innerHTML = '';
+            list.style.display = 'block';
+
+            data.slice(0, 5).forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'res-item';
+                div.innerText = item.display_name;
+                div.onclick = () => {
+                    const latlng = [item.lat, item.lon];
+                    const m = (searchTarget === 'start') ? startMarker : endMarker;
+                    m.setLatLng(latlng);
+                    document.getElementById(searchTarget + 'Input').value = item.display_name;
+                    list.style.display = 'none';
+                    map.setView(latlng, 15);
+                };
+                list.appendChild(div);
+            });
+        }
+
+        // 4. Permanent Routing (OSRM) - No Token Needed
+        async function calculateRoute() {
+            const s = startMarker.getLatLng();
+            const e = endMarker.getLatLng();
+            
+            // OSRM 'bike' profile for Singapore
+            const url = `https://router.project-osrm.org/route/v1/bicycle/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=polyline`;
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                
+                if (routeLayer) map.removeLayer(routeLayer);
+                const points = decodePolyline(data.routes[0].geometry);
+                routeLayer = L.polyline(points, {color: '#1a73e8', weight: 6}).addTo(map);
+                map.fitBounds(routeLayer.getBounds(), {padding: [50, 50]});
+                
+                document.getElementById('nav-btn').style.display = 'block';
+            } catch (err) {
+                alert("Route failed. Try moving pins closer to a path.");
+            }
+        }
+
+        function startNav() {
+            isNavigating = true;
+            document.getElementById('ui').style.display = 'none';
+            document.getElementById('nav-guide').style.display = 'block';
+            const msg = new SpeechSynthesisUtterance("Starting navigation. Follow the blue line.");
+            window.speechSynthesis.speak(msg);
+            map.setZoom(18);
+        }
+
+        function createIcon(color) {
+            return L.divIcon({
+                html: `<div style="background:${color}; width:15px; height:15px; border:3px solid white; border-radius:50%; box-shadow: 0 0 5px rgba(0,0,0,0.5);"></div>`,
+                iconSize: [20, 20], iconAnchor: [10, 10]
+            });
+        }
+
+        function decodePolyline(str) {
+            let index = 0, lat = 0, lng = 0, coordinates = [], shift = 0, result = 0, byte = null;
+            while (index < str.length) {
+                shift = 0; result = 0;
+                do { byte = str.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
+                lat += ((result & 1) ? ~(result >> 1) : (result >> 1));
+                shift = 0; result = 0;
+                do { byte = str.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
+                lng += ((result & 1) ? ~(result >> 1) : (result >> 1));
+                coordinates.push([lat / 1e5, lng / 1e5]);
+            }
+            return coordinates;
+        }
+    </script>
+</body>
+</html>
